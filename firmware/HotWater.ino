@@ -310,6 +310,34 @@ static uint8_t voltageToPercent(float v) {
   return (uint8_t)lroundf((v - 3.20f) * (10.0f / 0.35f));
 }
 
+static void processZigbeeFor(uint32_t durationMs) {  
+  uint32_t startMs = millis();  
+  while (millis() - startMs < durationMs) {  
+    Zigbee.loop();  
+    delay(10);  
+  }  
+}  
+static void refreshSleepAttributeMirror() {  
+  bool ok1 = zbSleep.setAnalogOutput((float)sleepMinutes);  
+  bool ok2 = zbSleep.reportAnalogOutput();  
+  DBG_PRINT("mirror Sleep set=");  
+  DBG_PRINT(ok1 ? "true" : "false");  
+  DBG_PRINT(" report=");  
+  DBG_PRINTLN(ok2 ? "true" : "false");  
+}  
+static void refreshAwakeAttributeMirror() {  
+  bool ok1 = zbAwake.setAnalogOutput((float)forceAwakeSeconds);  
+  bool ok2 = zbAwake.reportAnalogOutput();  
+  DBG_PRINT("mirror AwakeSec set=");  
+  DBG_PRINT(ok1 ? "true" : "false");  
+  DBG_PRINT(" report=");  
+  DBG_PRINTLN(ok2 ? "true" : "false");  
+}  
+static uint32_t effectiveAwakeWindowMs() {  
+  uint32_t extra = forceAwakeSeconds * 1000UL;  
+  if (extra > MAX_FORCE_AWAKE_SEC * 1000UL) extra = MAX_FORCE_AWAKE_SEC * 1000UL;  
+  return CONFIG_WINDOW_MS + extra;  
+}  
 static void goToDeepSleepMinutes(uint32_t minutes) {
   uint64_t sleepUs = (uint64_t)minutes * 60ULL * 1000000ULL;
 
@@ -384,6 +412,24 @@ void onSleepMinutesChange(float value) {
   sleepValueChanged = true;
 }
 
+void onForceAwakeChange(float value) {  
+  uint32_t s = (uint32_t)lroundf(value);  
+  if (s > MAX_FORCE_AWAKE_SEC) s = MAX_FORCE_AWAKE_SEC;  
+  if (s == forceAwakeSeconds) {  
+    DBG_PRINT("Force-awake duplicate write ignored -> ");  
+    DBG_PRINTLN(s);  
+    return;  
+  }  
+  DBG_PRINT("Force-awake seconds updated from Zigbee: ");  
+  DBG_PRINT(forceAwakeSeconds);  
+  DBG_PRINT(" -> ");  
+  DBG_PRINTLN(s);  
+  forceAwakeSeconds = s;  
+  awakeValueChanged = true;  
+  if (s > 0) {  
+    awakeWindowMs = effectiveAwakeWindowMs();  
+  }  
+}  
 void setup() {
   DBG_BEGIN(115200);
   delay(500);
