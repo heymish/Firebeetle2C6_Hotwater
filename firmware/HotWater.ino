@@ -44,8 +44,9 @@ static const uint32_t MIN_SLEEP_MIN     = 1;
 static const uint32_t MAX_SLEEP_MIN     = 360;
 
 // Optimized awake windows
-static const uint32_t CONFIG_WINDOW_MS = 4000;   // reduced from development-time longer window
-static const uint32_t REPORT_FLUSH_MS  = 500;    // reduced from longer delay
+static const uint32_t CONFIG_WINDOW_MS = 10000;  // longer config window for reliable writes/reporting
+static const uint32_t REPORT_FLUSH_MS  = 1500;   // longer flush window so reports fully transmit
+static const uint32_t MAX_FORCE_AWAKE_SEC = 900; // up to 15 minutes from Z2M
 
 // Keep strings short (Zigbee metadata length limits)
 static const char* ZB_MANUFACTURER = "DIY";
@@ -56,6 +57,7 @@ static const uint8_t EP_TEMP1 = 1;
 static const uint8_t EP_TEMP2 = 2;
 static const uint8_t EP_TEMP3 = 3;
 static const uint8_t EP_SLEEP = 4;
+static const uint8_t EP_AWAKE = 5;
 
 // Preferences keys (must be short)
 static const char* PREF_NS        = "cfg";
@@ -100,13 +102,16 @@ ZigbeeTempSensor zbTemp1(EP_TEMP1);
 ZigbeeTempSensor zbTemp2(EP_TEMP2);
 ZigbeeTempSensor zbTemp3(EP_TEMP3);
 ZigbeeAnalog     zbSleep(EP_SLEEP);
+ZigbeeAnalog     zbAwake(EP_AWAKE);
 
 // ============================================================
 // Persistent / runtime state
 // ============================================================
 Preferences prefs;
 uint32_t sleepMinutes = DEFAULT_SLEEP_MIN;
+uint32_t forceAwakeSeconds = 0;
 volatile bool sleepValueChanged = false;
+volatile bool awakeValueChanged = false;
 bool debugNoSleep = false;
 
 // ============================================================
@@ -310,34 +315,13 @@ static uint8_t voltageToPercent(float v) {
   return (uint8_t)lroundf((v - 3.20f) * (10.0f / 0.35f));
 }
 
-static void processZigbeeFor(uint32_t durationMs) {  
-  uint32_t startMs = millis();  
-  while (millis() - startMs < durationMs) {  
-    Zigbee.loop();  
-    delay(10);  
-  }  
-}  
-static void refreshSleepAttributeMirror() {  
-  bool ok1 = zbSleep.setAnalogOutput((float)sleepMinutes);  
-  bool ok2 = zbSleep.reportAnalogOutput();  
-  DBG_PRINT("mirror Sleep set=");  
-  DBG_PRINT(ok1 ? "true" : "false");  
-  DBG_PRINT(" report=");  
-  DBG_PRINTLN(ok2 ? "true" : "false");  
-}  
-static void refreshAwakeAttributeMirror() {  
-  bool ok1 = zbAwake.setAnalogOutput((float)forceAwakeSeconds);  
-  bool ok2 = zbAwake.reportAnalogOutput();  
-  DBG_PRINT("mirror AwakeSec set=");  
-  DBG_PRINT(ok1 ? "true" : "false");  
-  DBG_PRINT(" report=");  
-  DBG_PRINTLN(ok2 ? "true" : "false");  
-}  
-static uint32_t effectiveAwakeWindowMs() {  
-  uint32_t extra = forceAwakeSeconds * 1000UL;  
-  if (extra > MAX_FORCE_AWAKE_SEC * 1000UL) extra = MAX_FORCE_AWAKE_SEC * 1000UL;  
-  return CONFIG_WINDOW_MS + extra;  
-}  
+static uint32_t effectiveAwakeWindowMs() {
+  uint32_t extraMs = forceAwakeSeconds * 1000UL;
+  uint32_t maxMs = MAX_FORCE_AWAKE_SEC * 1000UL;
+  if (extraMs > maxMs) extraMs = maxMs;
+  return CONFIG_WINDOW_MS + extraMs;
+}
+
 static void goToDeepSleepMinutes(uint32_t minutes) {
   uint64_t sleepUs = (uint64_t)minutes * 60ULL * 1000000ULL;
 
@@ -412,24 +396,22 @@ void onSleepMinutesChange(float value) {
   sleepValueChanged = true;
 }
 
-void onForceAwakeChange(float value) {  
-  uint32_t s = (uint32_t)lroundf(value);  
-  if (s > MAX_FORCE_AWAKE_SEC) s = MAX_FORCE_AWAKE_SEC;  
-  if (s == forceAwakeSeconds) {  
-    DBG_PRINT("Force-awake duplicate write ignored -> ");  
-    DBG_PRINTLN(s);  
-    return;  
-  }  
-  DBG_PRINT("Force-awake seconds updated from Zigbee: ");  
-  DBG_PRINT(forceAwakeSeconds);  
-  DBG_PRINT(" -> ");  
-  DBG_PRINTLN(s);  
-  forceAwakeSeconds = s;  
-  awakeValueChanged = true;  
-  if (s > 0) {  
-    awakeWindowMs = effectiveAwakeWindowMs();  
-  }  
-}  
+void onForceAwakeChange(float value) {
+  uint32_t s = (uint32_t)lroundf(value);
+  if (s > MAX_FORCE_AWAKE_SEC) s = MAX_FORCE_AWAKE_SEC;
+  if (s == forceAwakeSeconds) {
+    DBG_PRINT("Force-awake duplicate write ignored -> ");
+    DBG_PRINTLN(s);
+    return;
+  }
+  DBG_PRINT("Force-awake seconds updated from Zigbee: ");
+  DBG_PRINT(forceAwakeSeconds);
+  DBG_PRINT(" -> ");
+  DBG_PRINTLN(s);
+  forceAwakeSeconds = s;
+  awakeValueChanged = true;
+}
+
 void setup() {
   DBG_BEGIN(115200);
   delay(500);
@@ -487,6 +469,7 @@ void setup() {
   if (!zbTemp2.setManufacturerAndModel(ZB_MANUFACTURER, ZB_MODEL)) DBG_PRINTLN("zbTemp2 model failed");
   if (!zbTemp3.setManufacturerAndModel(ZB_MANUFACTURER, ZB_MODEL)) DBG_PRINTLN("zbTemp3 model failed");
   if (!zbSleep.setManufacturerAndModel(ZB_MANUFACTURER, ZB_MODEL)) DBG_PRINTLN("zbSleep model failed");
+  if (!zbAwake.setManufacturerAndModel(ZB_MANUFACTURER, ZB_MODEL)) DBG_PRINTLN("zbAwake model failed");
 
   // Must be before addEndpoint()
   zbTemp1.setDefaultValue(20.0f);
@@ -495,12 +478,21 @@ void setup() {
 
   // Sleep control endpoint: writable Analog Output
   zbSleep.addAnalogOutput();
-  if (!zbSleep.setAnalogOutputDescription("Sleep")) {
+  if (!zbSleep.setAnalogOutputDescription("SleepMin")) {
     DBG_PRINTLN("zbSleep description failed");
   }
   zbSleep.setAnalogOutputResolution(1.0f);
   zbSleep.setAnalogOutputMinMax((float)MIN_SLEEP_MIN, (float)MAX_SLEEP_MIN);
   zbSleep.onAnalogOutputChange(onSleepMinutesChange);
+
+  // Force-awake endpoint: writable Analog Output (seconds)
+  zbAwake.addAnalogOutput();
+  if (!zbAwake.setAnalogOutputDescription("AwakeSec")) {
+    DBG_PRINTLN("zbAwake description failed");
+  }
+  zbAwake.setAnalogOutputResolution(1.0f);
+  zbAwake.setAnalogOutputMinMax(0.0f, (float)MAX_FORCE_AWAKE_SEC);
+  zbAwake.onAnalogOutputChange(onForceAwakeChange);
 
   // -------------------------
   // Battery metadata init BEFORE Zigbee.begin()
@@ -525,6 +517,7 @@ void setup() {
   Zigbee.addEndpoint(&zbTemp2);
   Zigbee.addEndpoint(&zbTemp3);
   Zigbee.addEndpoint(&zbSleep);
+  Zigbee.addEndpoint(&zbAwake);
   Zigbee.setDebugMode(DEBUG_LOG);
 
   // End Device config
@@ -548,7 +541,7 @@ void setup() {
   DBG_PRINTLN("Zigbee connected");
 
   // Small settle delay after join
-  delay(500);
+  delay(1500);
 
   // Publish current sleep value so coordinator/frontend can see it
   bool okSleepSet = zbSleep.setAnalogOutput((float)sleepMinutes);
@@ -557,6 +550,14 @@ void setup() {
   DBG_PRINT(okSleepSet ? "true" : "false");
   DBG_PRINT(" report=");
   DBG_PRINTLN(okSleepRpt ? "true" : "false");
+
+  // Publish current force-awake value (normally 0)
+  bool okAwakeSet = zbAwake.setAnalogOutput((float)forceAwakeSeconds);
+  bool okAwakeRpt = zbAwake.reportAnalogOutput();
+  DBG_PRINT("Awake endpoint init set=");
+  DBG_PRINT(okAwakeSet ? "true" : "false");
+  DBG_PRINT(" report=");
+  DBG_PRINTLN(okAwakeRpt ? "true" : "false");
 
   // -------------------------
   // Request DS18B20 conversion asynchronously
@@ -620,6 +621,21 @@ void setup() {
       delay(1000);
     }
   }
+
+  // Reset transient force-awake back to 0 so the next cycle returns to normal unless re-commanded
+  if (forceAwakeSeconds != 0) {
+    forceAwakeSeconds = 0;
+    bool ok1 = zbAwake.setAnalogOutput((float)forceAwakeSeconds);
+    bool ok2 = zbAwake.reportAnalogOutput();
+    DBG_PRINT("reset AwakeSec set=");
+    DBG_PRINT(ok1 ? "true" : "false");
+    DBG_PRINT(" report=");
+    DBG_PRINTLN(ok2 ? "true" : "false");
+    delay(500);
+  }
+
+  // Final flush before sleeping
+  delay(1000);
 
   // Sleep
   goToDeepSleepMinutes(sleepMinutes);
