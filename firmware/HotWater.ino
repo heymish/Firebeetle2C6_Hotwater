@@ -16,7 +16,6 @@ SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 // Set to 0 for production / better battery life
 // ============================================================
 #define DEBUG_LOG 0
-
 #if DEBUG_LOG
   #define DBG_BEGIN(baud)      do { Serial.begin(baud); delay(300); } while (0)
   #define DBG_PRINT(x)         Serial.print(x)
@@ -43,10 +42,10 @@ static const uint32_t DEFAULT_SLEEP_MIN = 5;
 static const uint32_t MIN_SLEEP_MIN     = 1;
 static const uint32_t MAX_SLEEP_MIN     = 360;
 
-// Optimized awake windows
-static const uint32_t CONFIG_WINDOW_MS = 10000;  // longer config window for reliable writes/reporting
-static const uint32_t REPORT_FLUSH_MS  = 1500;   // longer flush window so reports fully transmit
-static const uint32_t MAX_FORCE_AWAKE_SEC = 900; // up to 15 minutes from Z2M
+// Awake window / reliability tuning
+static const uint32_t CONFIG_WINDOW_MS    = 10000; // base awake/config window
+static const uint32_t REPORT_FLUSH_MS     = 1500;  // time to allow reports to leave before config window
+static const uint32_t MAX_FORCE_AWAKE_SEC = 900;   // 15 minutes max extra awake time
 
 // Keep strings short (Zigbee metadata length limits)
 static const char* ZB_MANUFACTURER = "DIY";
@@ -60,11 +59,11 @@ static const uint8_t EP_SLEEP = 4;
 static const uint8_t EP_AWAKE = 5;
 
 // Preferences keys (must be short)
-static const char* PREF_NS        = "cfg";
-static const char* PREF_KEY_SLEEP = "sleep";
-static const char* PREF_KEY_P1    = "p1";
-static const char* PREF_KEY_P2    = "p2";
-static const char* PREF_KEY_P3    = "p3";
+static const char* PREF_NS         = "cfg";
+static const char* PREF_KEY_SLEEP  = "sleep";
+static const char* PREF_KEY_P1     = "p1";
+static const char* PREF_KEY_P2     = "p2";
+static const char* PREF_KEY_P3     = "p3";
 
 // Optional dev helper: hold BOOT at reset to stay awake and not sleep
 static const uint8_t BUTTON_PIN = BOOT_PIN;
@@ -113,6 +112,7 @@ uint32_t forceAwakeSeconds = 0;
 volatile bool sleepValueChanged = false;
 volatile bool awakeValueChanged = false;
 bool debugNoSleep = false;
+uint32_t lastActivityMs = 0;
 
 // ============================================================
 // Helpers
@@ -153,7 +153,6 @@ static const char* probeKey(uint8_t slot) {
 
 static bool loadProbeAddress(uint8_t slot, uint8_t out[8]) {
   const char* key = probeKey(slot);
-
   if (!prefs.isKey(key)) {
     clearAddress(out);
     return false;
@@ -301,17 +300,15 @@ static uint32_t readBatteryMilliVolts() {
 static uint8_t voltageToPercent(float v) {
   if (v >= 4.20f) return 100;
   if (v <= 3.20f) return 0;
-
-  if (v >= 4.10f) return (uint8_t)lroundf( 90 + (v - 4.10f) * (10.0f / 0.10f));
-  if (v >= 4.00f) return (uint8_t)lroundf( 80 + (v - 4.00f) * (10.0f / 0.10f));
-  if (v >= 3.92f) return (uint8_t)lroundf( 70 + (v - 3.92f) * (10.0f / 0.08f));
-  if (v >= 3.85f) return (uint8_t)lroundf( 60 + (v - 3.85f) * (10.0f / 0.07f));
-  if (v >= 3.80f) return (uint8_t)lroundf( 50 + (v - 3.80f) * (10.0f / 0.05f));
-  if (v >= 3.75f) return (uint8_t)lroundf( 40 + (v - 3.75f) * (10.0f / 0.05f));
-  if (v >= 3.70f) return (uint8_t)lroundf( 30 + (v - 3.70f) * (10.0f / 0.05f));
-  if (v >= 3.65f) return (uint8_t)lroundf( 20 + (v - 3.65f) * (10.0f / 0.05f));
-  if (v >= 3.55f) return (uint8_t)lroundf( 10 + (v - 3.55f) * (10.0f / 0.10f));
-
+  if (v >= 4.10f) return (uint8_t)lroundf(90 + (v - 4.10f) * (10.0f / 0.10f));
+  if (v >= 4.00f) return (uint8_t)lroundf(80 + (v - 4.00f) * (10.0f / 0.10f));
+  if (v >= 3.92f) return (uint8_t)lroundf(70 + (v - 3.92f) * (10.0f / 0.08f));
+  if (v >= 3.85f) return (uint8_t)lroundf(60 + (v - 3.85f) * (10.0f / 0.07f));
+  if (v >= 3.80f) return (uint8_t)lroundf(50 + (v - 3.80f) * (10.0f / 0.05f));
+  if (v >= 3.75f) return (uint8_t)lroundf(40 + (v - 3.75f) * (10.0f / 0.05f));
+  if (v >= 3.70f) return (uint8_t)lroundf(30 + (v - 3.70f) * (10.0f / 0.05f));
+  if (v >= 3.65f) return (uint8_t)lroundf(20 + (v - 3.65f) * (10.0f / 0.05f));
+  if (v >= 3.55f) return (uint8_t)lroundf(10 + (v - 3.55f) * (10.0f / 0.10f));
   return (uint8_t)lroundf((v - 3.20f) * (10.0f / 0.35f));
 }
 
@@ -332,8 +329,8 @@ static void goToDeepSleepMinutes(uint32_t minutes) {
   // Stop Zigbee stack before sleeping
   Zigbee.stop();
   delay(100);
-
   DBG_FLUSH();
+
   esp_sleep_enable_timer_wakeup(sleepUs);
   esp_deep_sleep_start();
 }
@@ -394,27 +391,38 @@ void onSleepMinutesChange(float value) {
   sleepMinutes = m;
   prefs.putUInt(PREF_KEY_SLEEP, sleepMinutes);
   sleepValueChanged = true;
+
+  // Auto-extend awake window when a command arrives
+  lastActivityMs = millis();
 }
 
 void onForceAwakeChange(float value) {
   uint32_t s = (uint32_t)lroundf(value);
+
   if (s > MAX_FORCE_AWAKE_SEC) s = MAX_FORCE_AWAKE_SEC;
+
   if (s == forceAwakeSeconds) {
     DBG_PRINT("Force-awake duplicate write ignored -> ");
     DBG_PRINTLN(s);
     return;
   }
+
   DBG_PRINT("Force-awake seconds updated from Zigbee: ");
   DBG_PRINT(forceAwakeSeconds);
   DBG_PRINT(" -> ");
   DBG_PRINTLN(s);
+
   forceAwakeSeconds = s;
   awakeValueChanged = true;
+
+  // Auto-extend awake window when a command arrives
+  lastActivityMs = millis();
 }
 
 void setup() {
   DBG_BEGIN(115200);
   delay(500);
+
   DBG_PRINTLN("Booting 3-sensor auto-mapped + battery + sleep-control Zigbee test");
 
   // Optional development safeguard: hold BOOT during reset to prevent sleeping
@@ -428,6 +436,7 @@ void setup() {
   // Preferences / persisted sleep interval + probe map
   // -------------------------
   prefs.begin(PREF_NS, false);
+
   sleepMinutes = prefs.getUInt(PREF_KEY_SLEEP, DEFAULT_SLEEP_MIN);
   if (sleepMinutes < MIN_SLEEP_MIN) sleepMinutes = MIN_SLEEP_MIN;
   if (sleepMinutes > MAX_SLEEP_MIN) sleepMinutes = MAX_SLEEP_MIN;
@@ -518,6 +527,7 @@ void setup() {
   Zigbee.addEndpoint(&zbTemp3);
   Zigbee.addEndpoint(&zbSleep);
   Zigbee.addEndpoint(&zbAwake);
+
   Zigbee.setDebugMode(DEBUG_LOG);
 
   // End Device config
@@ -595,11 +605,15 @@ void setup() {
   delay(REPORT_FLUSH_MS);
 
   // -------------------------
-  // Config window:
-  // Stay awake briefly so Zigbee2MQTT / HA can write the sleep interval
+  // Config / command window with auto-extend on command activity
   // -------------------------
-  uint32_t startMs = millis();
-  while (millis() - startMs < CONFIG_WINDOW_MS) {
+  lastActivityMs = millis();
+  uint32_t extraAwakeMs = forceAwakeSeconds * 1000UL;
+  if (extraAwakeMs > MAX_FORCE_AWAKE_SEC * 1000UL) {
+    extraAwakeMs = MAX_FORCE_AWAKE_SEC * 1000UL;
+  }
+
+  while ((millis() - lastActivityMs) < (CONFIG_WINDOW_MS + extraAwakeMs)) {
     if (sleepValueChanged) {
       sleepValueChanged = false;
 
@@ -610,9 +624,31 @@ void setup() {
       DBG_PRINT(ok1 ? "true" : "false");
       DBG_PRINT(" report=");
       DBG_PRINTLN(ok2 ? "true" : "false");
+
+      // Auto-extend awake window on command
+      lastActivityMs = millis();
     }
 
-    delay(50);
+    if (awakeValueChanged) {
+      awakeValueChanged = false;
+
+      bool ok1 = zbAwake.setAnalogOutput((float)forceAwakeSeconds);
+      bool ok2 = zbAwake.reportAnalogOutput();
+
+      DBG_PRINT("mirror AwakeSec set=");
+      DBG_PRINT(ok1 ? "true" : "false");
+      DBG_PRINT(" report=");
+      DBG_PRINTLN(ok2 ? "true" : "false");
+
+      // Recompute extra awake time and extend from "now"
+      extraAwakeMs = forceAwakeSeconds * 1000UL;
+      if (extraAwakeMs > MAX_FORCE_AWAKE_SEC * 1000UL) {
+        extraAwakeMs = MAX_FORCE_AWAKE_SEC * 1000UL;
+      }
+      lastActivityMs = millis();
+    }
+
+    delay(10);  // allow background Zigbee task to run
   }
 
   if (debugNoSleep) {
@@ -625,12 +661,15 @@ void setup() {
   // Reset transient force-awake back to 0 so the next cycle returns to normal unless re-commanded
   if (forceAwakeSeconds != 0) {
     forceAwakeSeconds = 0;
+
     bool ok1 = zbAwake.setAnalogOutput((float)forceAwakeSeconds);
     bool ok2 = zbAwake.reportAnalogOutput();
+
     DBG_PRINT("reset AwakeSec set=");
     DBG_PRINT(ok1 ? "true" : "false");
     DBG_PRINT(" report=");
     DBG_PRINTLN(ok2 ? "true" : "false");
+
     delay(500);
   }
 
