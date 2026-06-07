@@ -583,4 +583,3 @@ void loop() {
   // not used; device sleeps from setup()
   delay(1000);
 }
-``
