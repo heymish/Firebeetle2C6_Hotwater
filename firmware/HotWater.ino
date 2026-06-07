@@ -1,3 +1,4 @@
+
 #include <Arduino.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -645,3 +646,50 @@ void setup() {
       extraAwakeMs = forceAwakeSeconds * 1000UL;
       if (extraAwakeMs > MAX_FORCE_AWAKE_SEC * 1000UL) {
         extraAwakeMs = MAX_FORCE_AWAKE_SEC * 1000UL;
+      }
+
+      lastActivityMs = millis();
+    }
+
+    delay(10);  // allow background Zigbee task to run
+  }
+
+  // -------------------------
+  // Second sensor publish before sleeping (gives a second outbound chance this wake cycle)
+  // -------------------------
+  publishAllSensors();
+  delay(REPORT_FLUSH_MS);
+
+  if (debugNoSleep) {
+    DBG_PRINTLN("Debug mode active: not sleeping");
+    while (true) {
+      delay(1000);
+    }
+  }
+
+  // Reset transient force-awake back to 0 so the next cycle returns to normal unless re-commanded
+  if (forceAwakeSeconds != 0) {
+    forceAwakeSeconds = 0;
+
+    bool ok1 = zbAwake.setAnalogOutput((float)forceAwakeSeconds);
+    bool ok2 = zbAwake.reportAnalogOutput();
+
+    DBG_PRINT("reset AwakeSec set=");
+    DBG_PRINT(ok1 ? "true" : "false");
+    DBG_PRINT(" report=");
+    DBG_PRINTLN(ok2 ? "true" : "false");
+
+    delay(500);
+  }
+
+  // Final flush before sleeping
+  delay(1000);
+
+  // Sleep
+  goToDeepSleepMinutes(sleepMinutes);
+}
+
+void loop() {
+  // not used; device sleeps from setup()
+  delay(1000);
+}
