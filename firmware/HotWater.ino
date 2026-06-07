@@ -15,7 +15,7 @@ SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 // DEBUG LOGGING CONTROL
 // Set to 0 for production / better battery life
 // ============================================================
-#define DEBUG_LOG 0
+#define DEBUG_LOG 1
 #if DEBUG_LOG
   #define DBG_BEGIN(baud)      do { Serial.begin(baud); delay(300); } while (0)
   #define DBG_PRINT(x)         Serial.print(x)
@@ -43,9 +43,9 @@ static const uint32_t MIN_SLEEP_MIN     = 1;
 static const uint32_t MAX_SLEEP_MIN     = 360;
 
 // Awake window / reliability tuning
-static const uint32_t CONFIG_WINDOW_MS    = 10000; // base awake/config window
-static const uint32_t REPORT_FLUSH_MS     = 1500;  // time to allow reports to leave before config window
-static const uint32_t MAX_FORCE_AWAKE_SEC = 900;   // 15 minutes max extra awake time
+static const uint32_t CONFIG_WINDOW_MS     = 10000; // base awake/config window
+static const uint32_t REPORT_FLUSH_MS      = 1500;  // time to allow reports to leave before config window
+static const uint32_t MAX_FORCE_AWAKE_SEC  = 900;   // 15 minutes max extra awake time
 
 // Keep strings short (Zigbee metadata length limits)
 static const char* ZB_MANUFACTURER = "DIY";
@@ -369,6 +369,33 @@ static void reportOneSensor(ZigbeeTempSensor &ep, const uint8_t addr[8], uint8_t
   }
 }
 
+static void publishAllSensors() {
+  // Request DS18B20 conversion asynchronously
+  dallas.requestTemperatures();
+  delay(DS18_CONVERSION_MS);
+
+  // Publish temperatures
+  if (probeMapped[0] && dallas.isConnected(probeAddr[0])) reportOneSensor(zbTemp1, probeAddr[0], 1);
+  if (probeMapped[1] && dallas.isConnected(probeAddr[1])) reportOneSensor(zbTemp2, probeAddr[1], 2);
+  if (probeMapped[2] && dallas.isConnected(probeAddr[2])) reportOneSensor(zbTemp3, probeAddr[2], 3);
+
+  // Publish battery on endpoint 1
+  uint32_t batMv = readBatteryMilliVolts();
+  float batV = batMv / 1000.0f;
+  uint8_t batPct = voltageToPercent(batV);
+  bool okSetBat = zbTemp1.setBatteryPercentage(batPct);
+  bool okRptBat = zbTemp1.reportBatteryPercentage();
+
+  DBG_PRINT("Battery V=");
+  DBG_PRINT(batV);
+  DBG_PRINT(" pct=");
+  DBG_PRINT(batPct);
+  DBG_PRINT(" set=");
+  DBG_PRINT(okSetBat ? "true" : "false");
+  DBG_PRINT(" report=");
+  DBG_PRINTLN(okRptBat ? "true" : "false");
+}
+
 // Zigbee callback for writable sleep value
 void onSleepMinutesChange(float value) {
   uint32_t m = (uint32_t)lroundf(value);
@@ -551,7 +578,7 @@ void setup() {
   DBG_PRINTLN("Zigbee connected");
 
   // Small settle delay after join
-  delay(1500);
+  delay(3000);
 
   // Publish current sleep value so coordinator/frontend can see it
   bool okSleepSet = zbSleep.setAnalogOutput((float)sleepMinutes);
@@ -570,44 +597,18 @@ void setup() {
   DBG_PRINTLN(okAwakeRpt ? "true" : "false");
 
   // -------------------------
-  // Request DS18B20 conversion asynchronously
+  // First sensor publish after join settles
   // -------------------------
-  dallas.requestTemperatures();
-  delay(DS18_CONVERSION_MS);
+  publishAllSensors();
 
-  // -------------------------
-  // Read all temperatures once
-  // -------------------------
-  if (probeMapped[0] && dallas.isConnected(probeAddr[0])) reportOneSensor(zbTemp1, probeAddr[0], 1);
-  if (probeMapped[1] && dallas.isConnected(probeAddr[1])) reportOneSensor(zbTemp2, probeAddr[1], 2);
-  if (probeMapped[2] && dallas.isConnected(probeAddr[2])) reportOneSensor(zbTemp3, probeAddr[2], 3);
-
-  // -------------------------
-  // Read and report battery once (using endpoint 1)
-  // -------------------------
-  uint32_t batMv = readBatteryMilliVolts();
-  float batV = batMv / 1000.0f;
-  uint8_t batPct = voltageToPercent(batV);
-
-  bool ok3 = zbTemp1.setBatteryPercentage(batPct);
-  bool ok4 = zbTemp1.reportBatteryPercentage();
-
-  DBG_PRINT("Battery V=");
-  DBG_PRINT(batV);
-  DBG_PRINT(" pct=");
-  DBG_PRINT(batPct);
-  DBG_PRINT(" set=");
-  DBG_PRINT(ok3 ? "true" : "false");
-  DBG_PRINT(" report=");
-  DBG_PRINTLN(ok4 ? "true" : "false");
-
-  // Give reports a short moment to flush before opening config window
+  // Give first reports a short moment to flush before opening config window
   delay(REPORT_FLUSH_MS);
 
   // -------------------------
   // Config / command window with auto-extend on command activity
   // -------------------------
   lastActivityMs = millis();
+
   uint32_t extraAwakeMs = forceAwakeSeconds * 1000UL;
   if (extraAwakeMs > MAX_FORCE_AWAKE_SEC * 1000UL) {
     extraAwakeMs = MAX_FORCE_AWAKE_SEC * 1000UL;
@@ -644,43 +645,3 @@ void setup() {
       extraAwakeMs = forceAwakeSeconds * 1000UL;
       if (extraAwakeMs > MAX_FORCE_AWAKE_SEC * 1000UL) {
         extraAwakeMs = MAX_FORCE_AWAKE_SEC * 1000UL;
-      }
-      lastActivityMs = millis();
-    }
-
-    delay(10);  // allow background Zigbee task to run
-  }
-
-  if (debugNoSleep) {
-    DBG_PRINTLN("Debug mode active: not sleeping");
-    while (true) {
-      delay(1000);
-    }
-  }
-
-  // Reset transient force-awake back to 0 so the next cycle returns to normal unless re-commanded
-  if (forceAwakeSeconds != 0) {
-    forceAwakeSeconds = 0;
-
-    bool ok1 = zbAwake.setAnalogOutput((float)forceAwakeSeconds);
-    bool ok2 = zbAwake.reportAnalogOutput();
-
-    DBG_PRINT("reset AwakeSec set=");
-    DBG_PRINT(ok1 ? "true" : "false");
-    DBG_PRINT(" report=");
-    DBG_PRINTLN(ok2 ? "true" : "false");
-
-    delay(500);
-  }
-
-  // Final flush before sleeping
-  delay(1000);
-
-  // Sleep
-  goToDeepSleepMinutes(sleepMinutes);
-}
-
-void loop() {
-  // not used; device sleeps from setup()
-  delay(1000);
-}
