@@ -15,7 +15,7 @@ SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 // DEBUG LOGGING CONTROL
 // Set to 0 for production / better battery life
 // ============================================================
-#define DEBUG_LOG 1
+#define DEBUG_LOG 0
 
 #if DEBUG_LOG
   #define DBG_BEGIN(baud)      do { Serial.begin(baud); delay(300); } while (0)
