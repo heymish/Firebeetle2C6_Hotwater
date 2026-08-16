@@ -6,7 +6,7 @@
 #include <Zigbee.h>
 
 // Keep Arduino loopTask comfortable during bring-up
-SET_LOOP_TASK_STACK_SIZE(16 * 1024);
+SET_LOOP_TASK_STACK_SIZE(64 * 1024);
 
 #ifndef ZIGBEE_MODE_ED
 #error "Select Tools -> Zigbee mode -> Zigbee ED (End Device)"
