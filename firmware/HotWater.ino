@@ -45,7 +45,7 @@ static const uint32_t MAX_SLEEP_MIN     = 360;
 
 // Awake window / reliability tuning
 static const uint32_t CONFIG_WINDOW_MS     = 10000; // base awake/config window
-static const uint32_t REPORT_FLUSH_MS      = 1500;  // time to allow reports to leave before config window
+static const uint32_t REPORT_FLUSH_MS      = 10000;  // time to allow reports to leave before config window
 static const uint32_t MAX_FORCE_AWAKE_SEC  = 900;   // 15 minutes max extra awake time
 
 // Keep strings short (Zigbee metadata length limits)
@@ -453,6 +453,9 @@ void setup() {
 
   DBG_PRINTLN("Booting 3-sensor auto-mapped + battery + sleep-control Zigbee test");
 
+  //Max is 20. Set to 16 due to brown out. Going to try 470uF Cap on the 3.3V
+  esp_zb_set_tx_power(16);
+  
   // Optional development safeguard: hold BOOT during reset to prevent sleeping
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   debugNoSleep = (digitalRead(BUTTON_PIN) == LOW);
